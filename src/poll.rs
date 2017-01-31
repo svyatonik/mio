@@ -958,4 +958,53 @@ mod test {
         assert_eq!(0, num);
         assert_eq!(0, readiness_node_count(&poll));
     }
+
+    #[test]
+    pub fn drop_registration_from_non_main_thread() {
+        use std::thread;
+        use std::sync::mpsc::channel;
+
+        const THREADS: usize = 8;
+
+        let mut poll = Poll::new().unwrap();
+        let mut events = Events::with_capacity(1024);
+        let mut senders = Vec::with_capacity(THREADS);
+        let mut token_index = 0;
+
+        // spawn threads, which will send messages to single receiver
+        for _ in 0..THREADS {
+            let (tx, rx) = channel();
+            senders.push(tx);
+
+            thread::spawn(move || {
+                loop {
+                    let (registration, set_readiness): (Registration, SetReadiness) = rx.recv().unwrap();
+                    let _ = set_readiness.set_readiness(Ready::readable());
+                    drop(registration);
+                    drop(set_readiness);
+                }
+            });
+        }
+
+        let mut index: usize = 0;
+        loop {
+            let (registration, set_readiness) = Registration::new(&mut poll, Token(token_index), Ready::readable(), PollOpt::edge());
+            let _ = senders[index].send((registration, set_readiness));
+
+            token_index += 1;
+            index += 1;
+            if index == THREADS {
+                index = 0;
+
+                let (registration, set_readiness) = Registration::new(&mut poll, Token(token_index), Ready::readable(), PollOpt::edge());
+                let _ = set_readiness.set_readiness(Ready::readable());
+                drop(registration);
+                drop(set_readiness);
+                token_index += 1;
+
+                thread::park_timeout(Duration::from_millis(0));
+                let _ = poll.poll(&mut events, None).unwrap();
+            }
+        }
+    }
 }
